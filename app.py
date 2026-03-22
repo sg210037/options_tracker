@@ -110,6 +110,13 @@ def load_and_parse(uploaded_file):
     df = pd.read_csv(io.StringIO(csv_text))
     df.columns = df.columns.str.strip()
 
+    if 'Account' not in df.columns:
+        account_col = [c for c in df.columns if 'account' in c.lower()]
+        if account_col:
+            df.rename(columns={account_col[0]: 'Account'}, inplace=True)
+        else:
+            df['Account'] = 'Default'
+
     df['Run Date'] = pd.to_datetime(df['Run Date'], format='%m/%d/%Y', errors='coerce')
 
     for col in ['Price ($)', 'Amount ($)', 'Commission ($)', 'Fees ($)']:
@@ -603,14 +610,21 @@ if has_data:
                 ).reset_index()
                 strategy_pnl['win_rate'] = (strategy_pnl['wins'] / strategy_pnl['count'] * 100).round(1)
 
+                all_strategies = sorted(strategy_pnl['strategy'].unique())
+                palette = px.colors.qualitative.Plotly
+                strategy_colors = {s: palette[i % len(palette)] for i, s in enumerate(all_strategies)}
+
                 col_a, col_b = st.columns(2)
                 with col_a:
+                    pie_data = strategy_pnl[strategy_pnl['total_pnl'] > 0]
                     fig_pie = px.pie(
-                        strategy_pnl[strategy_pnl['total_pnl'] > 0],
+                        pie_data,
                         values='total_pnl',
                         names='strategy',
                         title='Income by Strategy (Profitable Only)',
-                        hole=0.3
+                        hole=0.3,
+                        color='strategy',
+                        color_discrete_map=strategy_colors
                     )
                     st.plotly_chart(fig_pie, width="stretch")
 
@@ -621,7 +635,8 @@ if has_data:
                         y='total_pnl',
                         color='strategy',
                         title='Total P&L by Strategy',
-                        text='count'
+                        text='count',
+                        color_discrete_map=strategy_colors
                     )
                     fig_bar.update_traces(texttemplate='%{text} trades', textposition='outside')
                     st.plotly_chart(fig_bar, width="stretch")
@@ -819,7 +834,8 @@ if not has_data and uploaded_file is None:
     Upload a Fidelity Accounts_History CSV file from the sidebar to see your options trading data, or use the **Watchlist** tab above to track stock prices.
 
     ### Expected CSV Format
-    The CSV should contain columns: **Run Date, Account, Action, Symbol, Description, Type, Price ($), Quantity, Commission ($), Fees ($), Amount ($), Settlement Date**
+    The CSV should contain columns: **Run Date, Action, Symbol, Price ($), Quantity, Amount ($)**
+    Optional columns: **Account, Description, Type, Commission ($), Fees ($), Settlement Date**
 
     ### Features
     - **Watchlist**: Track live stock prices with configurable auto-refresh
