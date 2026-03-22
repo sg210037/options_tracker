@@ -1,6 +1,6 @@
 # Options Trading Performance Tracker
 
-A Streamlit-based dashboard application that parses Fidelity "Accounts_History" CSV exports to track, analyze, and visualize options trading performance across multiple accounts and strategies. Also includes a live stock watchlist powered by Yahoo Finance.
+A Streamlit-based dashboard application that parses Fidelity "Accounts_History" CSV exports to track, analyze, and visualize options trading performance. Supports both multi-account and single-account CSV exports. Also includes a live stock watchlist powered by Yahoo Finance.
 
 ---
 
@@ -136,7 +136,11 @@ The **Watchlist** tab is always available, even before uploading any CSV file.
 3. Set the date range (e.g., Jan 1 to current date)
 4. Click **Download** to export the CSV file
 
-The CSV should have columns: `Run Date, Account, Account Number, Action, Symbol, Description, Type, Price ($), Quantity, Commission ($), Fees ($), Accrued Interest ($), Amount ($), Settlement Date`
+The CSV should have columns: `Run Date, Action, Symbol, Price ($), Quantity, Amount ($)`
+
+Optional columns (handled gracefully if missing): `Account, Account Number, Description, Type, Commission ($), Fees ($), Accrued Interest ($), Settlement Date`
+
+> **Note:** Single-account Fidelity exports often omit the `Account` column. The app detects this and assigns a "Default" account label automatically.
 
 ### Step 2: Upload CSV
 
@@ -151,7 +155,7 @@ The sidebar provides three multi-select filters:
 
 - **Filter by Underlying** - Show only specific tickers (e.g., TSLA, NVDA, XSP)
 - **Filter by Account** - Isolate by Fidelity account (BrokerageLink, Individual, Joint, ROTH IRA, HSA)
-- **Filter by Strategy** - Focus on specific strategies (Cash Secured Put, Covered Call, Credit Spread)
+- **Filter by Strategy** - Focus on specific strategies (Cash Secured Put, Covered Call, Call/Put Credit Spread, Call/Put Debit Spread, Iron Condor, Long Call, Long Put)
 
 All filters default to showing everything. Deselect items to narrow the view.
 
@@ -204,7 +208,7 @@ Yahoo Finance  -->  [Watchlist Module]  -->  [Watchlist Tab]
                       yfinance fast_info
 ```
 
-All logic resides in a single `app.py` file (~823 lines) with core functions and the Streamlit UI layer.
+All logic resides in a single `app.py` file (~880 lines) with core functions and the Streamlit UI layer.
 
 ---
 
@@ -290,9 +294,19 @@ Transactions that don't match an option symbol pattern are classified into categ
 | Stock Trade   | "BOUGHT" or "SOLD" in Action         |
 | Other         | Everything else                      |
 
+#### Missing Column Handling
+
+Single-account Fidelity exports often omit the `Account` column. The parser handles this gracefully:
+
+1. If an `Account` column exists, it is used as-is
+2. If no `Account` column exists but a column with "account" in its name does (e.g., `Account Name`, `Account Number`), it is renamed to `Account`
+3. If no account-related column exists at all, a default `Account` column is created with the value `"Default"`
+
+Optional numeric columns (`Commission ($)`, `Fees ($)`) are only processed if present. The `Description` column is checked before use in non-option classification.
+
 #### Numeric Cleaning
 
-- `Price ($)`, `Amount ($)`, `Commission ($)`, `Fees ($)` are converted to float via `pd.to_numeric()` with comma stripping
+- `Price ($)`, `Amount ($)`, `Commission ($)`, `Fees ($)` are converted to float via `pd.to_numeric()` with comma stripping (only if the column exists)
 - `Quantity` is converted to integer
 - NaN values in numeric columns are filled with 0.0
 - `Run Date` is parsed as datetime with `MM/DD/YYYY` format
@@ -315,17 +329,23 @@ The engine runs in two passes:
 4. If yes, classify as a credit spread and process as a single multi-leg trade
 5. Track which transaction indices were consumed by spread processing
 
-The spread type is determined by the option types of the legs:
+The spread type is determined by the option types of the legs and the net amount:
 
-| Sold Leg Type | Bought Leg Type | Strategy            |
-|---------------|-----------------|---------------------|
-| Call          | Call            | Call Credit Spread  |
-| Put           | Put             | Put Credit Spread   |
-| Mixed         | Mixed           | Credit Spread       |
+| Sold Leg Type | Bought Leg Type | Net Amount | Strategy              |
+|---------------|-----------------|------------|-----------------------|
+| Call + Put    | Call + Put      | Any        | Iron Condor           |
+| Call          | Call            | >= 0       | Call Credit Spread    |
+| Call          | Call            | < 0        | Call Debit Spread     |
+| Put           | Put             | >= 0       | Put Credit Spread     |
+| Put           | Put             | < 0        | Put Debit Spread      |
+| Mixed         | Mixed           | >= 0       | Credit Spread         |
+| Mixed         | Mixed           | < 0        | Debit Spread          |
 
-Net credit = sum of all leg amounts (sold legs are positive, bought legs are negative in Fidelity's format).
+Net amount = sum of all leg amounts (sold legs are positive, bought legs are negative in Fidelity's format). A positive net indicates a credit received; negative indicates a debit paid.
 
-Strike description is built as: `"Sold 664.0/665.0/666.0 / Bought 660.0/661.0/662.0"` to show all strikes in multi-contract spreads.
+For Iron Condors, the strike description shows both wings: `"P 22.0/24.0 | C 30.0/32.0"` (put spread strikes on the left, call spread strikes on the right).
+
+For other spreads, strike description is built as: `"Sold 664.0/665.0/666.0 / Bought 660.0/661.0/662.0"` to show all strikes in multi-contract spreads.
 
 **Pass 2 - Single Leg Trades:**
 
@@ -376,6 +396,16 @@ Example - Credit Spread:
 - Open: SOLD PUT $666 = +$75.77, BOUGHT PUT $662 = -$42.23, Net = +$33.54
 - Close: Both EXPIRED = $0.00
 - P&L = $33.54 + $0.00 = **+$33.54**
+
+Example - Iron Condor:
+- Open: SOLD PUT $22 = +$50.00, BOUGHT PUT $20 = -$20.00, SOLD CALL $30 = +$45.00, BOUGHT CALL $32 = -$15.00, Net = +$60.00
+- Close: All EXPIRED = $0.00
+- P&L = $60.00 + $0.00 = **+$60.00**
+
+Example - Call Debit Spread:
+- Open: BOUGHT CALL $100 = -$300.00, SOLD CALL $105 = +$150.00, Net = -$150.00
+- Close: SOLD CLOSING CALL $100 = +$400.00, BOUGHT CLOSING CALL $105 = -$100.00, Close = +$300.00
+- P&L = -$150.00 + $300.00 = **+$150.00**
 
 Example - Bought Closing (rolled or managed):
 - Open: SOLD PUT $59 = +$443.33
@@ -669,7 +699,7 @@ Each ticker is fetched independently with error handling so that a single failed
 
 ```
 ~/options_tracker/
-  app.py              # Main application (~823 lines)
+  app.py              # Main application (~880 lines)
   requirements.txt    # Python dependencies (streamlit, pandas, plotly, yfinance)
   README.md           # This file
 ```
@@ -686,7 +716,9 @@ The app has been validated with these Fidelity account types:
 - ROTH IRA
 - Health Savings Account (HSA)
 
-Each account is tracked independently - trades are never grouped across accounts.
+Each account is tracked independently — trades are never grouped across accounts.
+
+**Single-account exports** (where the CSV omits the `Account` column entirely) are fully supported. The app assigns a "Default" account label and all functionality works normally.
 
 ---
 
