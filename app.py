@@ -160,8 +160,11 @@ def build_trades(df):
     debits are negative in Fidelity's format).
 
     For strategy classification:
-    - Credit Spread: same underlying, same expiration, same run date, same account,
-      has both SOLD OPENING and BOUGHT OPENING legs
+    - Iron Condor: same group has both Call and Put among sold AND bought legs
+      (i.e., a Call Credit Spread + Put Credit Spread on the same underlying/expiration/date)
+    - Credit/Debit Spread: same underlying, same expiration, same run date, same account,
+      has both SOLD OPENING and BOUGHT OPENING legs (calls only or puts only).
+      Net positive amount = credit spread, net negative = debit spread.
     - Covered Call: SOLD OPENING CALL (single leg)
     - Cash Secured Put: SOLD OPENING PUT (single leg)
     """
@@ -203,16 +206,45 @@ def build_trades(df):
         sold_types = set(sold_legs['option_type'].unique())
         bought_types = set(bought_legs['option_type'].unique())
 
-        if 'Call' in sold_types and 'Call' in bought_types:
-            strategy = 'Call Credit Spread'
-        elif 'Put' in sold_types and 'Put' in bought_types:
-            strategy = 'Put Credit Spread'
-        else:
-            strategy = 'Credit Spread'
+        has_call_spread = 'Call' in sold_types and 'Call' in bought_types
+        has_put_spread = 'Put' in sold_types and 'Put' in bought_types
 
-        sold_strikes = sorted(sold_legs['strike'].unique())
-        bought_strikes = sorted(bought_legs['strike'].unique())
-        strike_desc = f"Sold {'/'.join(str(s) for s in sold_strikes)} / Bought {'/'.join(str(s) for s in bought_strikes)}"
+        if has_call_spread and has_put_spread:
+            strategy = 'Iron Condor'
+
+            sold_calls = sold_legs[sold_legs['option_type'] == 'Call']
+            bought_calls = bought_legs[bought_legs['option_type'] == 'Call']
+            sold_puts = sold_legs[sold_legs['option_type'] == 'Put']
+            bought_puts = bought_legs[bought_legs['option_type'] == 'Put']
+
+            put_strikes = sorted(
+                list(bought_puts['strike'].unique()) + list(sold_puts['strike'].unique())
+            )
+            call_strikes = sorted(
+                list(sold_calls['strike'].unique()) + list(bought_calls['strike'].unique())
+            )
+            strike_desc = (
+                f"P {'/'.join(str(s) for s in put_strikes)} | "
+                f"C {'/'.join(str(s) for s in call_strikes)}"
+            )
+        elif has_call_spread:
+            spread_type = 'Credit' if net_credit >= 0 else 'Debit'
+            strategy = f'Call {spread_type} Spread'
+            sold_strikes = sorted(sold_legs['strike'].unique())
+            bought_strikes = sorted(bought_legs['strike'].unique())
+            strike_desc = f"Sold {'/'.join(str(s) for s in sold_strikes)} / Bought {'/'.join(str(s) for s in bought_strikes)}"
+        elif has_put_spread:
+            spread_type = 'Credit' if net_credit >= 0 else 'Debit'
+            strategy = f'Put {spread_type} Spread'
+            sold_strikes = sorted(sold_legs['strike'].unique())
+            bought_strikes = sorted(bought_legs['strike'].unique())
+            strike_desc = f"Sold {'/'.join(str(s) for s in sold_strikes)} / Bought {'/'.join(str(s) for s in bought_strikes)}"
+        else:
+            spread_type = 'Credit' if net_credit >= 0 else 'Debit'
+            strategy = f'{spread_type} Spread'
+            sold_strikes = sorted(sold_legs['strike'].unique())
+            bought_strikes = sorted(bought_legs['strike'].unique())
+            strike_desc = f"Sold {'/'.join(str(s) for s in sold_strikes)} / Bought {'/'.join(str(s) for s in bought_strikes)}"
 
         spread_symbols = set(grp['Symbol'].str.strip().unique())
 
