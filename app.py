@@ -448,6 +448,537 @@ def render_watchlist_quotes(tickers):
         st.dataframe(display, hide_index=True, width="stretch")
 
 
+def fetch_spx_vix_data():
+    """Fetch current SPX price, today's open, and VIX level via yfinance."""
+    data = {'spx_price': None, 'spx_open': None, 'vix': None, 'error': None}
+    try:
+        spx = yf.Ticker("^GSPC")
+        spx_hist = spx.history(period="1d")
+        if len(spx_hist) > 0:
+            data['spx_open'] = float(spx_hist['Open'].iloc[-1])
+            data['spx_price'] = float(spx_hist['Close'].iloc[-1])
+        fi = spx.fast_info
+        if fi.last_price:
+            data['spx_price'] = float(fi.last_price)
+    except Exception as e:
+        data['error'] = f"SPX fetch error: {e}"
+
+    try:
+        vix = yf.Ticker("^VIX")
+        fi_vix = vix.fast_info
+        if fi_vix.last_price:
+            data['vix'] = float(fi_vix.last_price)
+    except Exception as e:
+        data['error'] = (data['error'] or '') + f" VIX fetch error: {e}"
+
+    return data
+
+
+def round_to_strike(value, increment=5):
+    """Round a value to the nearest SPX strike increment."""
+    return int(round(value / increment) * increment)
+
+
+def compute_trade_suggestions(spx_price, spx_open, vix, params):
+    """
+    Core rule engine: compute trade bias, strike selection, and suggested spreads.
+    Returns a dict with all computed values and trade suggestions.
+    """
+    result = {
+        'checklist': [],
+        'bias': None,
+        'suggestions': [],
+        'morning_move_pct': None,
+    }
+
+    vix_min = params['vix_min']
+    vix_max = params['vix_max']
+    vix_conservative_threshold = params['vix_conservative_threshold']
+    move_threshold = params['move_threshold']
+    otm_normal = params['otm_normal']
+    otm_conservative = params['otm_conservative']
+    spread_width = params['spread_width']
+    min_credit = params['min_credit']
+    max_credit = params['max_credit']
+    otm_adjust_step = params['otm_adjust_step']
+    account_size = params['account_size']
+    risk_pct = params['risk_pct']
+    profit_target_pct = params['profit_target_pct']
+    stop_loss_multiplier = params['stop_loss_multiplier']
+    strike_increment = params['strike_increment']
+
+    # --- Pre-trade checklist ---
+    vix_ok = vix_min <= vix <= vix_max
+    result['checklist'].append({
+        'rule': f'VIX in range [{vix_min}, {vix_max}]',
+        'value': f'{vix:.2f}',
+        'pass': vix_ok,
+    })
+
+    now = datetime.now()
+    time_ok = now.hour >= 6 and (now.hour > 6 or now.minute >= 45)
+    time_str = now.strftime('%H:%M PST')
+    result['checklist'].append({
+        'rule': 'After 6:45 AM PST (9:45 AM ET)',
+        'value': time_str,
+        'pass': time_ok,
+    })
+
+    max_risk_per_trade = account_size * (risk_pct / 100)
+    max_spreads = max(1, int(max_risk_per_trade / (spread_width * 100)))
+    result['checklist'].append({
+        'rule': f'Account risk ≤ {risk_pct}% (\\${max_risk_per_trade:,.0f})',
+        'value': f'Max {max_spreads} × {spread_width}-pt spreads',
+        'pass': True,
+    })
+
+    # --- Morning move & bias ---
+    morning_move_pct = ((spx_price - spx_open) / spx_open) * 100
+    result['morning_move_pct'] = morning_move_pct
+
+    if morning_move_pct >= move_threshold:
+        result['bias'] = 'Bearish'
+    elif morning_move_pct <= -move_threshold:
+        result['bias'] = 'Bullish'
+    else:
+        result['bias'] = 'Neutral'
+
+    # --- OTM % based on VIX ---
+    if vix <= vix_conservative_threshold:
+        base_otm = otm_normal
+        vix_regime = 'Normal'
+    else:
+        base_otm = otm_conservative
+        vix_regime = 'Elevated'
+
+    result['vix_regime'] = vix_regime
+    result['base_otm'] = base_otm
+
+    # --- Generate suggestions at 3 aggressiveness levels ---
+    variations = [
+        ('Aggressive', base_otm - otm_adjust_step),
+        ('Moderate', base_otm),
+        ('Conservative', base_otm + otm_adjust_step),
+    ]
+
+    for label, otm_pct in variations:
+        otm_pct = max(0.25, otm_pct)
+        trades = []
+
+        if result['bias'] in ('Bearish', 'Neutral'):
+            short_call_raw = spx_price * (1 + otm_pct / 100)
+            short_call = round_to_strike(short_call_raw, strike_increment)
+            long_call = short_call + spread_width
+            est_credit = _estimate_credit(otm_pct, vix, spread_width, 'call')
+            max_loss = (spread_width * 100) - (est_credit * 100)
+            trades.append({
+                'type': 'Call Credit Spread',
+                'short_strike': short_call,
+                'long_strike': long_call,
+                'short_leg': f'Sell {short_call}C',
+                'long_leg': f'Buy {long_call}C',
+                'est_credit': est_credit,
+                'max_loss': max_loss,
+                'otm_pct': otm_pct,
+                'pop_est': _estimate_pop(otm_pct, vix),
+            })
+
+        if result['bias'] in ('Bullish', 'Neutral'):
+            short_put_raw = spx_price * (1 - otm_pct / 100)
+            short_put = round_to_strike(short_put_raw, strike_increment)
+            long_put = short_put - spread_width
+            est_credit = _estimate_credit(otm_pct, vix, spread_width, 'put')
+            max_loss = (spread_width * 100) - (est_credit * 100)
+            trades.append({
+                'type': 'Put Credit Spread',
+                'short_strike': short_put,
+                'long_strike': long_put,
+                'short_leg': f'Sell {short_put}P',
+                'long_leg': f'Buy {long_put}P',
+                'est_credit': est_credit,
+                'max_loss': max_loss,
+                'otm_pct': otm_pct,
+                'pop_est': _estimate_pop(otm_pct, vix),
+            })
+
+        result['suggestions'].append({
+            'label': label,
+            'otm_pct': otm_pct,
+            'trades': trades,
+        })
+
+    result['max_spreads'] = max_spreads
+    result['max_risk_per_trade'] = max_risk_per_trade
+    result['spread_width'] = spread_width
+    result['min_credit'] = min_credit
+    result['max_credit'] = max_credit
+    result['profit_target_pct'] = profit_target_pct
+    result['stop_loss_multiplier'] = stop_loss_multiplier
+
+    return result
+
+
+def _estimate_credit(otm_pct, vix, spread_width, side):
+    """
+    Rough credit estimate based on OTM distance, VIX, and spread width.
+    This is a heuristic — real credits require live option chain data.
+    """
+    vix_factor = vix / 20.0
+    distance_factor = max(0.05, 1.0 - (otm_pct / 3.0))
+    width_factor = spread_width / 5.0
+    base = 0.40 * vix_factor * distance_factor * width_factor
+
+    if side == 'put':
+        base *= 1.05
+
+    return round(max(0.05, min(base, spread_width * 0.8)), 2)
+
+
+def _estimate_pop(otm_pct, vix):
+    """Rough probability-of-profit estimate based on OTM % and VIX."""
+    base_pop = 50 + (otm_pct * 12) - (vix * 0.4)
+    return round(max(50, min(95, base_pop)), 1)
+
+
+def render_spx_trade_builder_tab():
+    """Render the SPX 0DTE Credit Spread Trade Builder tab."""
+
+    st.subheader("SPX 0DTE Credit Spread Builder")
+    st.caption("Rule-based trade formulator for SPX call/put credit spreads")
+
+    # ---- Customizable Parameters (sidebar-style expander) ----
+    with st.expander("Trade Rules & Parameters", expanded=False):
+        st.markdown("**Adjust the rules below to customize trade generation.**")
+
+        rule_col1, rule_col2, rule_col3 = st.columns(3)
+
+        with rule_col1:
+            st.markdown("**VIX Filter**")
+            vix_range = st.slider(
+                "VIX Range (only trade within)",
+                min_value=10.0, max_value=40.0,
+                value=(15.0, 25.0), step=0.5,
+                key='spx_vix_range'
+            )
+            vix_conservative = st.slider(
+                "VIX Conservative Threshold",
+                min_value=vix_range[0], max_value=vix_range[1],
+                value=min(22.0, vix_range[1]), step=0.5,
+                key='spx_vix_conservative',
+                help="Above this VIX → use conservative (wider) OTM%"
+            )
+
+        with rule_col2:
+            st.markdown("**Morning Move & Bias**")
+            move_threshold = st.slider(
+                "Move Threshold for Bias (%)",
+                min_value=0.25, max_value=2.0,
+                value=0.75, step=0.25,
+                key='spx_move_threshold',
+                help="Morning move beyond this triggers directional bias"
+            )
+            otm_normal = st.slider(
+                "OTM % (Normal VIX)",
+                min_value=0.50, max_value=3.0,
+                value=1.5, step=0.25,
+                key='spx_otm_normal'
+            )
+            otm_conservative = st.slider(
+                "OTM % (Elevated VIX)",
+                min_value=0.50, max_value=4.0,
+                value=2.0, step=0.25,
+                key='spx_otm_conservative'
+            )
+            otm_adjust_step = st.slider(
+                "OTM Adjust Step (±%)",
+                min_value=0.25, max_value=1.0,
+                value=0.25, step=0.25,
+                key='spx_otm_adjust',
+                help="Step used for aggressive/conservative variations"
+            )
+
+        with rule_col3:
+            st.markdown("**Spread & Risk**")
+            spread_width = st.selectbox(
+                "Spread Width (points)",
+                options=[5, 10, 15, 20, 25],
+                index=1,
+                key='spx_spread_width'
+            )
+            strike_increment = st.selectbox(
+                "Strike Increment",
+                options=[5, 10, 25],
+                index=0,
+                key='spx_strike_inc'
+            )
+            credit_range = st.slider(
+                "Target Credit Range ($)",
+                min_value=0.10, max_value=2.0,
+                value=(0.30, 0.60), step=0.05,
+                key='spx_credit_range'
+            )
+            account_size = st.number_input(
+                "Account Size ($)",
+                min_value=1000, max_value=10_000_000,
+                value=50000, step=5000,
+                key='spx_account_size'
+            )
+            risk_pct = st.slider(
+                "Max Risk per Trade (% of account)",
+                min_value=0.5, max_value=5.0,
+                value=1.0, step=0.5,
+                key='spx_risk_pct'
+            )
+
+        mgmt_col1, mgmt_col2 = st.columns(2)
+        with mgmt_col1:
+            st.markdown("**Trade Management**")
+            profit_target_pct = st.slider(
+                "Profit Target (% of credit)",
+                min_value=25, max_value=90,
+                value=50, step=5,
+                key='spx_profit_target',
+                help="Close when you can buy back at this % of original credit"
+            )
+        with mgmt_col2:
+            st.markdown("** **")
+            stop_loss_multiplier = st.slider(
+                "Stop Loss (× credit received)",
+                min_value=1.5, max_value=5.0,
+                value=2.5, step=0.5,
+                key='spx_stop_loss',
+                help="Exit if spread costs this many times your credit to close"
+            )
+
+    # ---- Fetch Live Data ----
+    st.markdown("---")
+
+    @st.fragment(run_every=30)
+    def _live_data_fragment():
+        data = fetch_spx_vix_data()
+
+        if data['error']:
+            st.warning(data['error'])
+        if data['spx_price'] is None or data['vix'] is None:
+            st.error("Unable to fetch SPX or VIX data. Check your internet connection.")
+            return
+
+        spx_price = data['spx_price']
+        spx_open = data['spx_open'] or spx_price
+        vix_val = data['vix']
+
+        last_updated = datetime.now().strftime('%Y-%m-%d %H:%M:%S PST')
+        st.caption(f"Market data as of: {last_updated}  •  Auto-refreshes every 30s")
+
+        # Market snapshot
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        morning_move = ((spx_price - spx_open) / spx_open) * 100 if spx_open else 0
+        mc1.metric("SPX Price", f"{spx_price:,.2f}")
+        mc2.metric("SPX Open", f"{spx_open:,.2f}")
+        mc3.metric("Morning Move", f"{morning_move:+.2f}%")
+        mc4.metric("VIX", f"{vix_val:.2f}")
+
+        # ---- Run the rule engine ----
+        params = {
+            'vix_min': vix_range[0],
+            'vix_max': vix_range[1],
+            'vix_conservative_threshold': vix_conservative,
+            'move_threshold': move_threshold,
+            'otm_normal': otm_normal,
+            'otm_conservative': otm_conservative,
+            'spread_width': spread_width,
+            'min_credit': credit_range[0],
+            'max_credit': credit_range[1],
+            'otm_adjust_step': otm_adjust_step,
+            'account_size': account_size,
+            'risk_pct': risk_pct,
+            'profit_target_pct': profit_target_pct,
+            'stop_loss_multiplier': stop_loss_multiplier,
+            'strike_increment': strike_increment,
+        }
+
+        result = compute_trade_suggestions(spx_price, spx_open, vix_val, params)
+
+        # ---- Pre-Trade Checklist ----
+        st.markdown("#### Pre-Trade Checklist")
+        all_pass = True
+        for item in result['checklist']:
+            icon = "✅" if item['pass'] else "❌"
+            if not item['pass']:
+                all_pass = False
+            st.markdown(f"{icon} **{item['rule']}** → {item['value']}")
+
+        if not all_pass:
+            st.warning("Not all pre-trade conditions are met. Proceed with caution or skip today.")
+
+        st.markdown("---")
+
+        # ---- Bias ----
+        bias = result['bias']
+        move_pct = result['morning_move_pct']
+        vix_regime = result['vix_regime']
+        base_otm = result['base_otm']
+
+        bias_colors = {'Bearish': '🔴', 'Bullish': '🟢', 'Neutral': '🟡'}
+        bias_icon = bias_colors.get(bias, '⚪')
+
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Bias", f"{bias_icon} {bias}")
+        b2.metric("Morning Move", f"{move_pct:+.2f}%")
+        b3.metric("VIX Regime", vix_regime)
+        b4.metric("Base OTM %", f"{base_otm:.2f}%")
+
+        if bias == 'Bearish':
+            st.info(
+                f"SPX is up **{move_pct:+.2f}%** from open → Bearish bias → "
+                f"**Sell Call Credit Spreads** (betting it won't keep ripping higher)"
+            )
+        elif bias == 'Bullish':
+            st.info(
+                f"SPX is down **{move_pct:+.2f}%** from open → Bullish bias → "
+                f"**Sell Put Credit Spreads** (betting it won't keep falling)"
+            )
+        else:
+            st.info(
+                f"SPX move **{move_pct:+.2f}%** is within ±{move_threshold}% threshold → "
+                f"Neutral → Consider **Iron Condor** (both sides) or skip"
+            )
+
+        st.markdown("---")
+
+        # ---- Trade Suggestions ----
+        st.markdown("#### Suggested Trades")
+        st.caption(
+            f"Spread width: {spread_width} pts  •  "
+            f"Strike increment: {strike_increment} pts  •  "
+            f"Max spreads: {result['max_spreads']} "
+            f"(risk ≤ \\${result['max_risk_per_trade']:,.0f})"
+        )
+
+        suggestion_tabs = st.tabs([s['label'] for s in result['suggestions']])
+
+        for stab, suggestion in zip(suggestion_tabs, result['suggestions']):
+            with stab:
+                st.markdown(f"**OTM: {suggestion['otm_pct']:.2f}%**")
+
+                for trade in suggestion['trades']:
+                    credit = trade['est_credit']
+                    min_c = result['min_credit']
+                    max_c = result['max_credit']
+
+                    if credit < min_c:
+                        credit_note = f"⚠️ Below target (&#36;{min_c:.2f}). Consider reducing OTM% or widening spread."
+                    elif credit > max_c:
+                        credit_note = f"⚠️ Above target (&#36;{max_c:.2f}). Consider increasing OTM% or narrowing spread."
+                    else:
+                        credit_note = "✅ Within target range"
+
+                    profit_target_val = credit * (result['profit_target_pct'] / 100)
+                    stop_loss_val = credit * result['stop_loss_multiplier']
+
+                    st.markdown(
+                        f"""
+                        <div style="border:1px solid #444; border-radius:10px; padding:16px 20px; margin-bottom:12px; background:#0e1117;">
+                            <div style="font-size:1.2em; font-weight:700; margin-bottom:8px;">{trade['type']}</div>
+                            <div style="display:flex; gap:40px; flex-wrap:wrap;">
+                                <div>
+                                    <div style="color:#888; font-size:0.85em;">Short Leg</div>
+                                    <div style="font-size:1.1em; font-weight:600;">{trade['short_leg']}</div>
+                                </div>
+                                <div>
+                                    <div style="color:#888; font-size:0.85em;">Long Leg</div>
+                                    <div style="font-size:1.1em; font-weight:600;">{trade['long_leg']}</div>
+                                </div>
+                                <div>
+                                    <div style="color:#888; font-size:0.85em;">Est. Credit</div>
+                                    <div style="font-size:1.1em; font-weight:600; color:#4CAF50;">${credit:.2f}</div>
+                                </div>
+                                <div>
+                                    <div style="color:#888; font-size:0.85em;">Max Loss / Spread</div>
+                                    <div style="font-size:1.1em; font-weight:600; color:#f44336;">${trade['max_loss']:,.0f}</div>
+                                </div>
+                                <div>
+                                    <div style="color:#888; font-size:0.85em;">Est. POP</div>
+                                    <div style="font-size:1.1em; font-weight:600;">{trade['pop_est']:.0f}%</div>
+                                </div>
+                                <div>
+                                    <div style="color:#888; font-size:0.85em;">OTM Distance</div>
+                                    <div style="font-size:1.1em; font-weight:600;">{trade['otm_pct']:.2f}%</div>
+                                </div>
+                            </div>
+                            <div style="margin-top:10px; font-size:0.9em;">{credit_note}</div>
+                            <div style="margin-top:8px; display:flex; gap:30px; font-size:0.85em; color:#aaa;">
+                                <span>Profit target: buy back at <b>${credit - profit_target_val:.2f}</b> ({result['profit_target_pct']}% of credit)</span>
+                                <span>Stop loss: exit at <b>${stop_loss_val:.2f}</b> debit ({result['stop_loss_multiplier']}× credit)</span>
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+        st.markdown("---")
+
+        # ---- Management Rules Summary ----
+        st.markdown("#### Trade Management Rules")
+        mgmt1, mgmt2, mgmt3 = st.columns(3)
+        profit_example = 0.45 * (1 - result['profit_target_pct'] / 100)
+        stop_example = 0.45 * result['stop_loss_multiplier']
+        with mgmt1:
+            st.markdown(
+                f"""<div>
+                <b>Profit Target</b><br>
+                • Close at <b>{result['profit_target_pct']}%</b> of credit received<br>
+                • E.g., &#36;0.45 credit → buy back at <b>&#36;{profit_example:.2f}</b>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        with mgmt2:
+            st.markdown(
+                f"""<div>
+                <b>Stop Loss</b><br>
+                • Exit at <b>{result['stop_loss_multiplier']}×</b> credit received<br>
+                • E.g., &#36;0.45 credit → stop at <b>&#36;{stop_example:.2f}</b> debit
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        with mgmt3:
+            st.markdown(
+                """<div>
+                <b>Time-Based Exit</b><br>
+                • Exit by <b>12:30–12:45 PM PST</b> (3:30–3:45 PM ET) at latest<br>
+                • Gamma risk accelerates in the final hour<br>
+                • Don't hold through the close on 0DTE
+                </div>""",
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("---")
+
+        # ---- Quick Reference: Today's Rule Summary ----
+        st.markdown("#### Today's Rule Summary")
+        summary_data = {
+            'Parameter': [
+                'VIX', 'VIX Regime', 'Morning Move', 'Bias',
+                'Base OTM %', 'Spread Width', 'Target Credit',
+                'Max Spreads', 'Max Risk',
+            ],
+            'Value': [
+                f'{vix_val:.2f}',
+                vix_regime,
+                f'{move_pct:+.2f}%',
+                bias,
+                f'{base_otm:.2f}%',
+                f'{spread_width} pts',
+                f'${result["min_credit"]:.2f} – ${result["max_credit"]:.2f}',
+                str(result['max_spreads']),
+                f'${result["max_risk_per_trade"]:,.0f}',
+            ],
+        }
+        st.dataframe(pd.DataFrame(summary_data), hide_index=True, width="stretch")
+
+    _live_data_fragment()
+
+
 REFRESH_OPTIONS = {
     "Off": 0,
     "Every 1s": 1,
@@ -567,13 +1098,14 @@ st.markdown("---")
 if has_data:
     tab_names = [
         "Watchlist",
+        "SPX Trade Builder",
         "Closed Trades & P&L",
         "Open Positions",
         "Dividends & Other Income",
         "Raw Transactions",
     ]
 else:
-    tab_names = ["Watchlist"]
+    tab_names = ["Watchlist", "SPX Trade Builder"]
 
 main_tabs = st.tabs(tab_names)
 tab_idx = 0
@@ -583,6 +1115,13 @@ tab_idx = 0
 # =============================================
 with main_tabs[tab_idx]:
     render_watchlist_tab()
+tab_idx += 1
+
+# =============================================
+# TAB: SPX Trade Builder (always available)
+# =============================================
+with main_tabs[tab_idx]:
+    render_spx_trade_builder_tab()
 tab_idx += 1
 
 if has_data:
@@ -755,31 +1294,84 @@ if has_data:
             oc2.metric("Total Open Premium", f"${total_open_premium:,.2f}")
             oc3.metric("Expiring Within 7 Days", f"{len(expiring_soon)}")
 
-            st.markdown("---")
+            open_chart_tabs = st.tabs(["Strategy Breakdown", "Underlying Breakdown", "All Open Positions"])
 
-            st.markdown("##### By Strategy")
-            strategy_counts = active.groupby('strategy').agg(
-                count=('trade_id', 'count'),
-                total_premium=('open_amount', 'sum')
-            ).reset_index()
-            strategy_counts.columns = ['Strategy', 'Count', 'Total Premium ($)']
-            strategy_counts['Total Premium ($)'] = strategy_counts['Total Premium ($)'].apply(lambda x: f"${x:,.2f}")
-            st.dataframe(strategy_counts, hide_index=True, width="stretch")
+            with open_chart_tabs[0]:
+                open_strategy = active.groupby('strategy').agg(
+                    count=('trade_id', 'count'),
+                    total_premium=('open_amount', 'sum')
+                ).reset_index()
 
-            st.markdown("---")
+                all_open_strategies = sorted(open_strategy['strategy'].unique())
+                palette = px.colors.qualitative.Plotly
+                open_strat_colors = {s: palette[i % len(palette)] for i, s in enumerate(all_open_strategies)}
 
-            st.markdown("##### All Open Positions")
-            active_display = active[[
-                'account', 'underlying', 'strategy', 'option_type',
-                'strikes', 'expiration', 'quantity', 'open_date', 'open_amount'
-            ]].copy()
-            active_display.columns = [
-                'Account', 'Underlying', 'Strategy', 'Type',
-                'Strikes', 'Expiration', 'Qty', 'Open Date', 'Open Amount ($)'
-            ]
-            active_display = active_display.sort_values(['Expiration', 'Underlying'])
-            active_display['Open Amount ($)'] = active_display['Open Amount ($)'].apply(lambda x: f"${x:,.2f}")
-            st.dataframe(active_display, hide_index=True, width="stretch")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    fig_pie = px.pie(
+                        open_strategy,
+                        values='count',
+                        names='strategy',
+                        title='Positions by Strategy',
+                        hole=0.3,
+                        color='strategy',
+                        color_discrete_map=open_strat_colors
+                    )
+                    st.plotly_chart(fig_pie, width="stretch")
+
+                with col_b:
+                    fig_bar = px.bar(
+                        open_strategy,
+                        x='strategy',
+                        y='total_premium',
+                        color='strategy',
+                        title='Total Premium by Strategy',
+                        text='count',
+                        color_discrete_map=open_strat_colors
+                    )
+                    fig_bar.update_traces(texttemplate='%{text} positions', textposition='outside')
+                    st.plotly_chart(fig_bar, width="stretch")
+
+                open_strategy_display = open_strategy.copy()
+                open_strategy_display.columns = ['Strategy', 'Count', 'Total Premium ($)']
+                open_strategy_display['Total Premium ($)'] = open_strategy_display['Total Premium ($)'].apply(lambda x: f"${x:,.2f}")
+                st.dataframe(open_strategy_display, hide_index=True, width="stretch")
+
+            with open_chart_tabs[1]:
+                open_underlying = active.groupby('underlying').agg(
+                    count=('trade_id', 'count'),
+                    total_premium=('open_amount', 'sum')
+                ).reset_index().sort_values('total_premium', ascending=False)
+
+                fig_und = px.bar(
+                    open_underlying,
+                    x='underlying',
+                    y='total_premium',
+                    color='total_premium',
+                    color_continuous_scale=['red', 'green'],
+                    title='Premium by Underlying',
+                    text='count'
+                )
+                fig_und.update_traces(texttemplate='%{text} positions', textposition='outside')
+                st.plotly_chart(fig_und, width="stretch")
+
+                open_underlying_display = open_underlying.copy()
+                open_underlying_display.columns = ['Underlying', 'Count', 'Total Premium ($)']
+                open_underlying_display['Total Premium ($)'] = open_underlying_display['Total Premium ($)'].apply(lambda x: f"${x:,.2f}")
+                st.dataframe(open_underlying_display, hide_index=True, width="stretch")
+
+            with open_chart_tabs[2]:
+                active_display = active[[
+                    'account', 'underlying', 'strategy', 'option_type',
+                    'strikes', 'expiration', 'quantity', 'open_date', 'open_amount'
+                ]].copy()
+                active_display.columns = [
+                    'Account', 'Underlying', 'Strategy', 'Type',
+                    'Strikes', 'Expiration', 'Qty', 'Open Date', 'Open Amount ($)'
+                ]
+                active_display = active_display.sort_values(['Expiration', 'Underlying'])
+                active_display['Open Amount ($)'] = active_display['Open Amount ($)'].apply(lambda x: f"${x:,.2f}")
+                st.dataframe(active_display, hide_index=True, width="stretch")
         else:
             st.info("No active positions.")
     tab_idx += 1
@@ -866,13 +1458,13 @@ if not has_data and uploaded_file is None:
     Upload a Fidelity Accounts_History CSV file from the sidebar to see your options trading data, or use the **Watchlist** tab above to track stock prices.
 
     ### Expected CSV Format
-    The CSV should contain columns: **Run Date, Action, Symbol, Price ($), Quantity, Amount ($)**
-    Optional columns: **Account, Description, Type, Commission ($), Fees ($), Settlement Date**
+    The CSV should contain columns: **Run Date, Action, Symbol, Price (\$), Quantity, Amount (\$)**
+    Optional columns: **Account, Description, Type, Commission (\$), Fees (\$), Settlement Date**
 
     ### Features
     - **Watchlist**: Track live stock prices with configurable auto-refresh
     - **Option Symbol Parsing**: Extracts underlying, expiration, strike, and type from symbols like `-BMNR260306C27`
-    - **Strategy Detection**: Identifies Credit Spreads, Covered Calls, and Cash Secured Puts
+    - **Strategy Detection**: Identifies Iron Condors, Call/Put Credit & Debit Spreads, Covered Calls, Cash Secured Puts, and Long Calls/Puts
     - **Trade Lifecycle**: Links opening and closing/expired transactions to compute realized P&L
     - **Interactive Dashboard**: Weekly/Monthly P&L charts, strategy breakdown, win rate, and active positions
     - **Dividends & Income**: Tracks dividends, interest, and other non-option transactions separately
