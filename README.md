@@ -1,6 +1,6 @@
 # Options Trading Performance Tracker
 
-A Streamlit-based dashboard application that parses Fidelity "Accounts_History" CSV exports to track, analyze, and visualize options trading performance. Supports both multi-account and single-account CSV exports. Also includes a live stock watchlist powered by Yahoo Finance.
+A Streamlit-based dashboard application that parses Fidelity "Accounts_History" CSV exports to track, analyze, and visualize options trading performance. Supports both multi-account and single-account CSV exports. Also includes a live stock watchlist and an SPX 0DTE credit spread trade builder, both powered by Yahoo Finance.
 
 ---
 
@@ -24,7 +24,7 @@ pip3 install -r requirements.txt
 streamlit run app.py
 ```
 
-Open http://localhost:8501 in your browser. The **Watchlist** tab is available immediately; upload your Fidelity CSV via the sidebar to unlock the trading tabs.
+Open http://localhost:8501 in your browser. The **Watchlist** and **SPX Trade Builder** tabs are available immediately; upload your Fidelity CSV via the sidebar to unlock the trading tabs.
 
 ---
 
@@ -34,7 +34,7 @@ Open http://localhost:8501 in your browser. The **Watchlist** tab is available i
 
 - Python 3.10 or higher
 - pip (Python package manager)
-- Internet access (required for the Watchlist tab to fetch live stock quotes)
+- Internet access (required for the Watchlist and SPX Trade Builder tabs to fetch live market data)
 
 ### Install Dependencies
 
@@ -129,6 +129,50 @@ The **Watchlist** tab is always available, even before uploading any CSV file.
    - Day high, day low, and volume
 6. A detail table below the cards adds Market Cap, 52-week High, and 52-week Low
 
+### SPX Trade Builder (no CSV required)
+
+The **SPX Trade Builder** tab is always available and provides a rule-based trade formulator for SPX 0DTE call/put credit spreads.
+
+1. Open the app and navigate to the **SPX Trade Builder** tab
+2. The tab fetches live SPX price, SPX open, and VIX data (auto-refreshes every 30 seconds)
+3. Expand **Trade Rules & Parameters** to customize the rules:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| VIX Range | 15–25 | Only suggest trades when VIX is within this range |
+| VIX Conservative Threshold | 22 | Above this → use wider OTM% for safer strikes |
+| Move Threshold | ±0.75% | Morning move beyond this triggers directional bias |
+| OTM % (Normal VIX) | 1.5% | Short strike distance when VIX ≤ threshold |
+| OTM % (Elevated VIX) | 2.0% | Short strike distance when VIX > threshold |
+| OTM Adjust Step | ±0.25% | Step for aggressive/conservative variations |
+| Spread Width | 10 pts | Distance between short and long strikes |
+| Strike Increment | 5 pts | SPX strike rounding (5, 10, or 25) |
+| Target Credit | \$0.30–\$0.60 | Acceptable net credit range |
+| Account Size | \$50,000 | Used for position sizing |
+| Max Risk per Trade | 1% | Max account percentage at risk per trade |
+| Profit Target | 50% | Close when you can buy back at this % of credit |
+| Stop Loss | 2.5× | Exit if spread costs this many times your credit |
+
+4. The **Pre-Trade Checklist** automatically evaluates:
+   - VIX within configured range
+   - Time after 6:45 AM PST (9:45 AM ET)
+   - Account risk sizing (max number of spreads)
+
+5. **Bias** is determined from the morning move:
+   - ≥ +threshold% → Bearish → Sell Call Credit Spreads
+   - ≤ −threshold% → Bullish → Sell Put Credit Spreads
+   - Within ±threshold% → Neutral → Iron Condor or skip
+
+6. **Suggested Trades** are shown in three sub-tabs (Aggressive, Moderate, Conservative), each displaying:
+   - Exact short/long strikes rounded to the nearest SPX increment
+   - Estimated credit and whether it falls within target range
+   - Max loss per spread, estimated probability of profit
+   - Profit target and stop loss levels
+
+7. **Trade Management Rules** summarize profit target, stop loss, and time-based exit (12:30–12:45 PM PST / 3:30–3:45 PM ET)
+
+> **Note:** Credit and probability estimates are heuristic approximations. For exact values, use a live options chain API (e.g., Polygon.io). The heuristics are calibrated to be directionally correct based on VIX, OTM distance, and spread width.
+
 ### Step 1: Export CSV from Fidelity
 
 1. Log into Fidelity.com
@@ -161,13 +205,18 @@ All filters default to showing everything. Deselect items to narrow the view.
 
 ### Step 4: Explore the Dashboard
 
-The dashboard is organized into five tabs:
+The dashboard is organized into six tabs:
 
 **Tab 1 — Watchlist** (always available)
 - Live stock price cards with auto-refresh
 - Detail table with extended market data
 
-**Tab 2 — Closed Trades & P&L** (primary analytics tab)
+**Tab 2 — SPX Trade Builder** (always available)
+- Rule-based 0DTE SPX credit spread formulator
+- Live SPX/VIX data with pre-trade checklist, bias determination, and trade suggestions at three aggressiveness levels
+- Fully customizable parameters (VIX range, OTM%, spread width, risk sizing, management rules)
+
+**Tab 3 — Closed Trades & P&L** (primary analytics tab)
 - KPI metrics row: Total Realized P&L, Closed Trades, Win Rate, Active Positions
 - Sub-tabs for charts:
   - **P&L Over Time** — Bar chart (green/red) with cumulative line overlay. Toggle between Weekly and Monthly aggregation.
@@ -175,17 +224,19 @@ The dashboard is organized into five tabs:
   - **Underlying Breakdown** — Bar chart of P&L by ticker symbol with a red-to-green color scale + summary table.
 - Closed Trades Detail table: full lifecycle of every completed trade including open/close amounts and realized P&L, sorted by close date (most recent first).
 
-**Tab 3 — Open Positions**
+**Tab 4 — Open Positions**
 - Summary metrics: count, total open premium, positions expiring within 7 days
-- Strategy breakdown table
-- Full positions table sorted by expiration date, then underlying
+- Sub-tabs for charts:
+  - **Strategy Breakdown** — Pie chart of positions by strategy + bar chart of total premium per strategy + summary table.
+  - **Underlying Breakdown** — Bar chart of premium by underlying ticker with a red-to-green color scale + summary table.
+  - **All Open Positions** — Full positions table sorted by expiration date, then underlying.
 
-**Tab 4 — Dividends & Other Income**
+**Tab 5 — Dividends & Other Income**
 - Summary metrics: Total Dividends, Total Interest, Other Amounts
 - Category summary table (Dividend, Interest, Reinvestment, Transfer, Fee, Stock Trade, Other)
 - Sub-tabs for each category with individual transaction details
 
-**Tab 5 — Raw Transactions**
+**Tab 6 — Raw Transactions**
 - Raw option transactions table with all parsed fields
 - Raw non-option transactions table with category labels
 
@@ -195,7 +246,7 @@ The dashboard is organized into five tabs:
 
 ### Architecture Overview
 
-The application follows a three-stage pipeline plus a standalone watchlist module:
+The application follows a three-stage pipeline plus two standalone modules (Watchlist and SPX Trade Builder):
 
 ```
 CSV File  -->  [1. Parse & Clean]  -->  [2. Trade Engine]  -->  [3. Dashboard UI]
@@ -206,9 +257,13 @@ CSV File  -->  [1. Parse & Clean]  -->  [2. Trade Engine]  -->  [3. Dashboard UI
 Yahoo Finance  -->  [Watchlist Module]  -->  [Watchlist Tab]
                       fetch_quotes()          st.fragment auto-refresh
                       yfinance fast_info
+
+Yahoo Finance  -->  [SPX Trade Builder]  -->  [SPX Trade Builder Tab]
+                      fetch_spx_vix_data()      st.fragment auto-refresh (30s)
+                      compute_trade_suggestions()
 ```
 
-All logic resides in a single `app.py` file (~880 lines) with core functions and the Streamlit UI layer.
+All logic resides in a single `app.py` file (~1,470 lines) with core functions and the Streamlit UI layer.
 
 ---
 
@@ -454,21 +509,98 @@ Below the cards, a full `st.dataframe` table shows all fields including Market C
 
 ---
 
+### SPX Trade Builder Module
+
+The SPX Trade Builder is independent of the CSV upload pipeline and is always available. It implements a rule-based engine for formulating SPX 0DTE credit spread trades.
+
+#### Data Fetching (`fetch_spx_vix_data`)
+
+Fetches three values from Yahoo Finance:
+
+| Field | Source | Method |
+|-------|--------|--------|
+| SPX Current Price | `^GSPC` | `yf.Ticker("^GSPC").fast_info.last_price` with fallback to `history(period="1d")` close |
+| SPX Today's Open | `^GSPC` | `yf.Ticker("^GSPC").history(period="1d")` open |
+| VIX Level | `^VIX` | `yf.Ticker("^VIX").fast_info.last_price` |
+
+Auto-refreshes every 30 seconds via `st.fragment(run_every=30)`.
+
+#### Rule Engine (`compute_trade_suggestions`)
+
+The engine runs a three-stage evaluation:
+
+**Stage 1 — Pre-Trade Checklist:**
+
+| Rule | Condition | Default |
+|------|-----------|---------|
+| VIX Filter | VIX within configured range | 15–25 |
+| Time Check | After 6:45 AM PST (9:45 AM ET) | Local clock |
+| Account Risk | Max risk ≤ N% of account size | 1% of \$50k |
+
+**Stage 2 — Bias Determination:**
+
+Morning move is calculated as `(Current SPX − Open SPX) / Open SPX × 100`.
+
+| Morning Move | Bias | Suggested Trade |
+|--------------|------|-----------------|
+| ≥ +threshold% | Bearish | Sell Call Credit Spread |
+| ≤ −threshold% | Bullish | Sell Put Credit Spread |
+| Within ±threshold% | Neutral | Both sides (Iron Condor) or skip |
+
+VIX regime determines the base OTM%:
+
+| VIX Level | Regime | Base OTM% |
+|-----------|--------|-----------|
+| ≤ Conservative threshold | Normal | 1.5% (default) |
+| > Conservative threshold | Elevated | 2.0% (default) |
+
+**Stage 3 — Strike Selection & Trade Generation:**
+
+For each of three aggressiveness levels (Aggressive = base − step, Moderate = base, Conservative = base + step):
+
+1. Compute short strike: `SPX Price × (1 ± OTM%)` (+ for calls, − for puts)
+2. Round to nearest strike increment (default 5 pts)
+3. Long strike = short strike ± spread width (+ for calls, − for puts)
+4. Estimate credit using heuristic: `0.40 × (VIX/20) × distance_factor × width_factor`
+5. Estimate POP: `50 + (OTM% × 12) − (VIX × 0.4)`, clamped to 50–95%
+6. Flag if estimated credit falls outside the target range
+
+#### Credit & POP Estimation
+
+The credit and probability-of-profit estimates are heuristic approximations, not derived from a live option chain or Black-Scholes model:
+
+- **Credit heuristic** (`_estimate_credit`): Scales a base credit of \$0.40 by VIX/20 (higher VIX = higher premium), a distance factor inversely proportional to OTM%, and a width factor proportional to spread width/5. Put spreads receive a 5% premium bump. Clamped to \$0.05–80% of spread width.
+- **POP heuristic** (`_estimate_pop`): A linear model where higher OTM% increases POP and higher VIX decreases it. Clamped to 50–95%.
+
+These are calibrated to produce directionally correct values for typical SPX 0DTE conditions. For production-grade accuracy, integrate a live options chain API (e.g., Polygon.io, CBOE).
+
+#### Customizable Parameters
+
+All rule parameters are exposed as Streamlit widgets (sliders, selectboxes, number inputs) in a collapsible expander. Parameters are grouped into three columns:
+
+- **VIX Filter**: VIX range slider, conservative threshold slider
+- **Morning Move & Bias**: Move threshold, OTM% for normal/elevated VIX, adjust step
+- **Spread & Risk**: Spread width, strike increment, credit range, account size, risk percentage
+
+Trade management parameters (profit target %, stop loss multiplier) are in a separate row below.
+
+---
+
 ### Stage 3: Dashboard UI
 
 #### Layout Structure
 
 ```
-+--sidebar--+  +--main area-------------------------------------------------+
-| Upload CSV |  | [KPI: P&L] [KPI: Trades] [KPI: Win%] [KPI: Open]          |
-| Filter:    |  |------------------------------------------------------------ |
-|  Underlying|  | Tab: Watchlist | Closed P&L | Open | Dividends | Raw       |
-|  Account   |  |                                                            |
-|  Strategy  |  | (tab content area)                                         |
-+------------+  +------------------------------------------------------------+
++--sidebar--+  +--main area--------------------------------------------------------------+
+| Upload CSV |  | [KPI: P&L] [KPI: Trades] [KPI: Win%] [KPI: Open]                       |
+| Filter:    |  |--------------------------------------------------------------------- ---|
+|  Underlying|  | Tab: Watchlist | SPX Builder | Closed P&L | Open | Dividends | Raw      |
+|  Account   |  |                                                                         |
+|  Strategy  |  | (tab content area)                                                      |
++------------+  +------------------------------------------------------------------------|
 ```
 
-When no CSV is uploaded, only the Watchlist tab is shown. After uploading, all five tabs appear.
+When no CSV is uploaded, only the Watchlist and SPX Trade Builder tabs are shown. After uploading, all six tabs appear.
 
 #### KPI Metrics
 
@@ -491,8 +623,10 @@ Below the charts: Closed Trades Detail table with full lifecycle data.
 #### Open Positions Tab
 
 - Summary metrics: count, total open premium, expiring within 7 days
-- Strategy breakdown table
-- Full positions table sorted by expiration then underlying
+- Sub-tabs for charts:
+  - **Strategy Breakdown**: Pie chart of position counts by strategy + bar chart of total premium per strategy with position counts + summary table.
+  - **Underlying Breakdown**: Bar chart with continuous red-to-green color scale based on premium + summary table.
+  - **All Open Positions**: Full positions table sorted by expiration then underlying.
 
 #### Dividends & Other Income Tab
 
@@ -553,15 +687,27 @@ Fidelity CSV Upload
 
 Yahoo Finance (yfinance)
         |
-        v
-  fetch_quotes()
-   |-- yf.Ticker(symbol).fast_info per ticker
-   |-- Compute daily change & change %
-        |
-        v
-  Watchlist Tab (st.fragment auto-refresh)
-   |-- Styled HTML price cards (3 per row)
-   |-- Detail table (Price, Change, Volume, Market Cap, 52W range)
+        +---------- Watchlist --------+-------- SPX Trade Builder --------+
+        |                             |                                   |
+        v                             v                                   |
+  fetch_quotes()                fetch_spx_vix_data()                      |
+   |-- fast_info per ticker      |-- ^GSPC price + open                   |
+   |-- Compute change & %        |-- ^VIX level                          |
+        |                             |                                   |
+        v                             v                                   |
+  Watchlist Tab               compute_trade_suggestions()                 |
+   |-- HTML price cards          |-- Pre-trade checklist                  |
+   |-- Detail table              |-- Bias from morning move               |
+   |-- Auto-refresh              |-- 3 aggressiveness levels              |
+                                 |-- Strike selection + credit est.       |
+                                      |                                   |
+                                      v                                   |
+                                SPX Trade Builder Tab                     |
+                                 |-- Checklist display                    |
+                                 |-- Bias + metrics                       |
+                                 |-- Trade suggestion cards               |
+                                 |-- Management rules                     |
+                                 |-- Auto-refresh (30s)                   |
 ```
 
 ---
@@ -587,7 +733,10 @@ Streamlit converts Python scripts into interactive web applications without requ
 | `st.tabs()`             | Tabbed interface for main sections and chart sub-sections  |
 | `st.radio()`            | Weekly/Monthly toggle for time aggregation                 |
 | `st.text_input()`       | Ticker symbol entry for watchlist                          |
-| `st.selectbox()`        | Auto-refresh rate picker for watchlist                     |
+| `st.selectbox()`        | Auto-refresh rate picker, spread width, strike increment   |
+| `st.slider()`           | VIX range, OTM%, move threshold, credit range, risk params |
+| `st.number_input()`     | Account size for SPX Trade Builder                         |
+| `st.expander()`         | Collapsible trade rules & parameters panel                 |
 | `st.fragment()`         | Partial re-run for watchlist auto-refresh without blocking |
 | `st.plotly_chart()`     | Render Plotly figures in the app                           |
 | `st.dataframe()`        | Render pandas DataFrames as interactive tables             |
@@ -699,7 +848,7 @@ Each ticker is fetched independently with error handling so that a single failed
 
 ```
 ~/options_tracker/
-  app.py              # Main application (~880 lines)
+  app.py              # Main application (~1,470 lines)
   requirements.txt    # Python dependencies (streamlit, pandas, plotly, yfinance)
   README.md           # This file
 ```
@@ -730,4 +879,6 @@ Each account is tracked independently — trades are never grouped across accoun
 - **Assignment handling**: Assigned options are treated as $0 close events (same as expiry). Stock assignment or cash settlement effects are not tracked.
 - **Single CSV at a time**: The app processes one uploaded file per session. To analyze a longer history, export a wider date range from Fidelity.
 - **Watchlist data source**: yfinance wraps Yahoo Finance's public APIs which may be rate-limited or temporarily unavailable. Quotes may be delayed up to 15 minutes for some exchanges.
+- **SPX Trade Builder estimates**: Credit and probability-of-profit values are heuristic approximations, not derived from live option chain data or Black-Scholes pricing. They are directionally correct but should not be used as the sole basis for trade execution. For production accuracy, integrate a live options chain API.
+- **SPX Trade Builder time zone**: Time checks assume the local machine is in PST (UTC−8). If running from a different time zone, the 6:45 AM pre-trade check will need adjustment.
 - **Non-option classification**: The `classify_non_option` function uses keyword matching on Action and Description fields. Unusual Fidelity action strings may be categorized as "Other."
