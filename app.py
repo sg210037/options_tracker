@@ -1,9 +1,18 @@
+# Options Trading Performance Tracker
+# Copyright (c) 2026 Sanjib Ghosh. All rights reserved.
+#
+# A Streamlit dashboard for tracking options trading performance from
+# Fidelity CSV exports, with a live watchlist and SPX 0DTE credit
+# spread trade builder.
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import re
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 import io
 import yfinance as yf
 
@@ -640,11 +649,51 @@ def _estimate_pop(otm_pct, vix):
     return round(max(50, min(95, base_pop)), 1)
 
 
+SPX_DEFAULTS_FILE = Path(__file__).parent / 'spx_defaults.json'
+
+SPX_FACTORY_DEFAULTS = {
+    'vix_range': [15.0, 25.0],
+    'vix_conservative': 22.0,
+    'move_threshold': 0.75,
+    'otm_normal': 1.5,
+    'otm_conservative': 2.0,
+    'otm_adjust_step': 0.25,
+    'spread_width': 10,
+    'strike_increment': 5,
+    'credit_range': [0.25, 0.75],
+    'account_size': 250000,
+    'risk_pct': 10.0,
+    'profit_target': 50,
+    'stop_loss': 2.5,
+}
+
+
+def _load_spx_defaults():
+    """Load saved defaults from JSON file, falling back to factory defaults."""
+    defaults = SPX_FACTORY_DEFAULTS.copy()
+    if SPX_DEFAULTS_FILE.exists():
+        try:
+            with open(SPX_DEFAULTS_FILE, 'r') as f:
+                saved = json.load(f)
+            defaults.update(saved)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return defaults
+
+
+def _save_spx_defaults(params):
+    """Save current parameter values to JSON file."""
+    with open(SPX_DEFAULTS_FILE, 'w') as f:
+        json.dump(params, f, indent=2)
+
+
 def render_spx_trade_builder_tab():
     """Render the SPX 0DTE Credit Spread Trade Builder tab."""
 
     st.subheader("SPX 0DTE Credit Spread Builder")
     st.caption("Rule-based trade formulator for SPX call/put credit spreads")
+
+    defaults = _load_spx_defaults()
 
     # ---- Customizable Parameters (sidebar-style expander) ----
     with st.expander("Trade Rules & Parameters", expanded=False):
@@ -657,13 +706,13 @@ def render_spx_trade_builder_tab():
             vix_range = st.slider(
                 "VIX Range (only trade within)",
                 min_value=10.0, max_value=40.0,
-                value=(15.0, 25.0), step=0.5,
+                value=tuple(defaults['vix_range']), step=0.5,
                 key='spx_vix_range'
             )
             vix_conservative = st.slider(
                 "VIX Conservative Threshold",
                 min_value=vix_range[0], max_value=vix_range[1],
-                value=min(22.0, vix_range[1]), step=0.5,
+                value=min(defaults['vix_conservative'], vix_range[1]), step=0.5,
                 key='spx_vix_conservative',
                 help="Above this VIX → use conservative (wider) OTM%"
             )
@@ -673,60 +722,64 @@ def render_spx_trade_builder_tab():
             move_threshold = st.slider(
                 "Move Threshold for Bias (%)",
                 min_value=0.25, max_value=2.0,
-                value=0.75, step=0.25,
+                value=defaults['move_threshold'], step=0.25,
                 key='spx_move_threshold',
                 help="Morning move beyond this triggers directional bias"
             )
             otm_normal = st.slider(
                 "OTM % (Normal VIX)",
                 min_value=0.50, max_value=3.0,
-                value=1.5, step=0.25,
+                value=defaults['otm_normal'], step=0.25,
                 key='spx_otm_normal'
             )
             otm_conservative = st.slider(
                 "OTM % (Elevated VIX)",
                 min_value=0.50, max_value=4.0,
-                value=2.0, step=0.25,
+                value=defaults['otm_conservative'], step=0.25,
                 key='spx_otm_conservative'
             )
             otm_adjust_step = st.slider(
                 "OTM Adjust Step (±%)",
                 min_value=0.25, max_value=1.0,
-                value=0.25, step=0.25,
+                value=defaults['otm_adjust_step'], step=0.25,
                 key='spx_otm_adjust',
                 help="Step used for aggressive/conservative variations"
             )
 
         with rule_col3:
             st.markdown("**Spread & Risk**")
+            spread_width_options = [5, 10, 15, 20, 25]
             spread_width = st.selectbox(
                 "Spread Width (points)",
-                options=[5, 10, 15, 20, 25],
-                index=1,
+                options=spread_width_options,
+                index=spread_width_options.index(defaults['spread_width'])
+                    if defaults['spread_width'] in spread_width_options else 1,
                 key='spx_spread_width'
             )
+            strike_inc_options = [5, 10, 25]
             strike_increment = st.selectbox(
                 "Strike Increment",
-                options=[5, 10, 25],
-                index=0,
+                options=strike_inc_options,
+                index=strike_inc_options.index(defaults['strike_increment'])
+                    if defaults['strike_increment'] in strike_inc_options else 0,
                 key='spx_strike_inc'
             )
             credit_range = st.slider(
                 "Target Credit Range ($)",
                 min_value=0.10, max_value=2.0,
-                value=(0.30, 0.60), step=0.05,
+                value=tuple(defaults['credit_range']), step=0.05,
                 key='spx_credit_range'
             )
             account_size = st.number_input(
                 "Account Size ($)",
-                min_value=1000, max_value=10_000_000,
-                value=50000, step=5000,
+                min_value=10000, max_value=10_000_000,
+                value=defaults['account_size'], step=10000,
                 key='spx_account_size'
             )
             risk_pct = st.slider(
                 "Max Risk per Trade (% of account)",
-                min_value=0.5, max_value=5.0,
-                value=1.0, step=0.5,
+                min_value=1.0, max_value=20.0,
+                value=defaults['risk_pct'], step=1.0,
                 key='spx_risk_pct'
             )
 
@@ -736,7 +789,7 @@ def render_spx_trade_builder_tab():
             profit_target_pct = st.slider(
                 "Profit Target (% of credit)",
                 min_value=25, max_value=90,
-                value=50, step=5,
+                value=defaults['profit_target'], step=5,
                 key='spx_profit_target',
                 help="Close when you can buy back at this % of original credit"
             )
@@ -745,10 +798,62 @@ def render_spx_trade_builder_tab():
             stop_loss_multiplier = st.slider(
                 "Stop Loss (× credit received)",
                 min_value=1.5, max_value=5.0,
-                value=2.5, step=0.5,
+                value=defaults['stop_loss'], step=0.5,
                 key='spx_stop_loss',
                 help="Exit if spread costs this many times your credit to close"
             )
+
+        # ---- Save / Reset Defaults ----
+        st.markdown("---")
+        current_params = {
+            'vix_range': list(vix_range),
+            'vix_conservative': vix_conservative,
+            'move_threshold': move_threshold,
+            'otm_normal': otm_normal,
+            'otm_conservative': otm_conservative,
+            'otm_adjust_step': otm_adjust_step,
+            'spread_width': spread_width,
+            'strike_increment': strike_increment,
+            'credit_range': list(credit_range),
+            'account_size': account_size,
+            'risk_pct': risk_pct,
+            'profit_target': profit_target_pct,
+            'stop_loss': stop_loss_multiplier,
+        }
+
+        has_saved = SPX_DEFAULTS_FILE.exists()
+        has_changes = current_params != defaults
+
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+        with btn_col1:
+            if st.button(
+                "Save as Defaults",
+                key='spx_save_defaults',
+                disabled=not has_changes,
+                help="Save current settings so they load automatically next time",
+            ):
+                _save_spx_defaults(current_params)
+                st.success("Defaults saved.")
+                st.rerun()
+        with btn_col2:
+            if st.button(
+                "Reset to Factory",
+                key='spx_reset_defaults',
+                disabled=not has_saved,
+                help="Discard saved defaults and revert to factory settings",
+            ):
+                if SPX_DEFAULTS_FILE.exists():
+                    SPX_DEFAULTS_FILE.unlink()
+                spx_keys = [k for k in st.session_state if k.startswith('spx_')]
+                for k in spx_keys:
+                    del st.session_state[k]
+                st.success("Reset to factory defaults.")
+                st.rerun()
+        with btn_col3:
+            if has_saved:
+                st.caption("Using saved defaults from `spx_defaults.json`")
+            else:
+                st.caption("Using factory defaults")
 
     # ---- Fetch Live Data ----
     st.markdown("---")
@@ -768,7 +873,12 @@ def render_spx_trade_builder_tab():
         vix_val = data['vix']
 
         last_updated = datetime.now().strftime('%Y-%m-%d %H:%M:%S PST')
-        st.caption(f"Market data as of: {last_updated}  •  Auto-refreshes every 30s")
+
+        refresh_col, ts_col = st.columns([1, 4])
+        with refresh_col:
+            st.button("Refresh", key='spx_manual_refresh', help="Re-fetch SPX/VIX prices and recompute trades")
+        with ts_col:
+            st.caption(f"Market data as of: {last_updated}  •  Auto-refreshes every 30s")
 
         # Market snapshot
         mc1, mc2, mc3, mc4 = st.columns(4)
