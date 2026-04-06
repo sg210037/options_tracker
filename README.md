@@ -153,23 +153,26 @@ The **SPX Trade Builder** tab is always available and provides a rule-based trad
 | Profit Target | 50% | Close when you can buy back at this % of credit |
 | Stop Loss | 2.5× | Exit if spread costs this many times your credit |
 
-4. The **Pre-Trade Checklist** automatically evaluates:
+4. To persist your customized settings, click **Save as Defaults** at the bottom of the expander. This writes a `spx_defaults.json` file so your values are restored automatically on the next app launch. Click **Reset to Factory** to discard saved defaults and revert all parameters to their original values.
+
+5. The **Pre-Trade Checklist** automatically evaluates:
    - VIX within configured range
    - Time after 6:45 AM PST (9:45 AM ET)
    - Account risk sizing (max number of spreads)
 
-5. **Bias** is determined from the morning move:
+6. **Bias** is determined from the morning move:
    - ≥ +threshold% → Bearish → Sell Call Credit Spreads
    - ≤ −threshold% → Bullish → Sell Put Credit Spreads
    - Within ±threshold% → Neutral → Iron Condor or skip
 
-6. **Suggested Trades** are shown in three sub-tabs (Aggressive, Moderate, Conservative), each displaying:
+7. **Suggested Trades** are shown in three sub-tabs (Aggressive, Moderate, Conservative), each displaying:
    - Exact short/long strikes rounded to the nearest SPX increment
    - Estimated credit and whether it falls within target range
    - Max loss per spread, estimated probability of profit
    - Profit target and stop loss levels
+   - Use the **Refresh** button above the trade suggestions to manually re-fetch live SPX/VIX prices and recompute all trades on demand (in addition to the 30-second auto-refresh)
 
-7. **Trade Management Rules** summarize profit target, stop loss, and time-based exit (12:30–12:45 PM PST / 3:30–3:45 PM ET)
+8. **Trade Management Rules** summarize profit target, stop loss, and time-based exit (12:30–12:45 PM PST / 3:30–3:45 PM ET)
 
 > **Note:** Credit and probability estimates are heuristic approximations. For exact values, use a live options chain API (e.g., Polygon.io). The heuristics are calibrated to be directionally correct based on VIX, OTM distance, and spread width.
 
@@ -584,6 +587,16 @@ All rule parameters are exposed as Streamlit widgets (sliders, selectboxes, numb
 
 Trade management parameters (profit target %, stop loss multiplier) are in a separate row below.
 
+#### Saving & Loading Defaults
+
+Parameter values can be persisted across app restarts:
+
+- **Save as Defaults**: Writes all current widget values to `spx_defaults.json` (in the app directory) as a human-readable JSON file. On next launch, `_load_spx_defaults()` reads this file and uses the saved values as widget defaults. The button is disabled when the current values match the loaded defaults (no unsaved changes).
+- **Reset to Factory**: Deletes `spx_defaults.json` and clears all `spx_*` keys from `st.session_state`, reverting every parameter to the hardcoded `SPX_FACTORY_DEFAULTS` dict. The button is disabled when no saved file exists.
+- **Refresh**: A manual refresh button inside the `st.fragment` triggers an immediate re-fetch of SPX/VIX data and recomputation of trade suggestions, without waiting for the 30-second auto-refresh cycle.
+
+The factory defaults are defined in `SPX_FACTORY_DEFAULTS` at module level for easy adjustment.
+
 ---
 
 ### Stage 3: Dashboard UI
@@ -848,8 +861,9 @@ Each ticker is fetched independently with error handling so that a single failed
 
 ```
 ~/options_tracker/
-  app.py              # Main application (~1,470 lines)
+  app.py              # Main application (~1,580 lines)
   requirements.txt    # Python dependencies (streamlit, pandas, plotly, yfinance)
+  spx_defaults.json   # User-saved SPX Trade Builder defaults (created on first save, git-ignored)
   README.md           # This file
 ```
 
